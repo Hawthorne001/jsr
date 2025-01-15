@@ -94,7 +94,7 @@ imposes on TypeScript code:
    `export =` or `import foo = require("foo")`.
 
 1. All types in exported functions, classes, variables, and types must be simply
-   inferred or explicit. If an expression is too complex to be inferred, it's
+   inferred or explicit. If an expression is too complex to be inferred, its
    type should be explicitly assigned to an intermediate type.
 
 1. Destructuring in exports is not supported. Instead of destructuring, export
@@ -139,7 +139,7 @@ Constants should have explicit type annotations:
 ### Global augmentation
 
 Module augmentation and global augmentation must not be used. This means that
-packages can not use `declare global` to introduce new global variables, or
+packages cannot use `declare global` to introduce new global variables, or
 `declare module` to augment other modules.
 
 Here are some examples of unsupported code:
@@ -177,7 +177,7 @@ Use ESM syntax instead:
 
 All types in exported functions, classes, variables, and types must be
 [simply inferred](#simple-inference) or explicit. If an expression is too
-complex to be inferred, it's type should be explicitly assigned to an
+complex to be inferred, its type should be explicitly assigned to an
 intermediate type.
 
 For example, in the following case the type of the default export is too complex
@@ -343,7 +343,7 @@ are:
 
 ## Ignoring slow types
 
-Due to their nature of affecting _if_ JSR can understand the code, you can not
+Due to their nature of affecting _if_ JSR can understand the code, you cannot
 selectively ignore individual diagnostics for slow types. Slow type diagnostics
 can only be ignored for the entire package. Doing this results in incomplete
 documentation and type declarations for the package, and slower type checking
@@ -367,7 +367,7 @@ adding the following to your `deno.json` configuration file:
 }
 ```
 
-Note that because slow type diagnostics can not be individually ignored, one can
+Note that because slow type diagnostics cannot be individually ignored, one can
 not use an ignore comment like `// deno-lint-ignore no-slow-types` to ignore
 slow type diagnostics.
 

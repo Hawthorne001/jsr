@@ -1,32 +1,21 @@
 // Copyright 2024 the JSR authors. All rights reserved. MIT license.
-import { Handlers, PageProps } from "$fresh/server.ts";
+import { HttpError } from "fresh";
 import { ComponentChildren } from "preact";
+import { define } from "../../../util.ts";
 import { ScopeHeader } from "../(_components)/ScopeHeader.tsx";
 import { ScopeNav } from "../(_components)/ScopeNav.tsx";
-import { State } from "../../../util.ts";
 import { FullScope, User } from "../../../utils/api_types.ts";
 import { scopeDataWithMember } from "../../../utils/data.ts";
 import { path } from "../../../utils/api.ts";
 import { QuotaCard } from "../../../components/QuotaCard.tsx";
-import { Head } from "$fresh/runtime.ts";
 import { Check } from "../../../components/icons/Check.tsx";
-import { ScopeIAM, scopeIAM } from "../../../utils/iam.ts";
+import { scopeIAM } from "../../../utils/iam.ts";
 
-interface Data {
-  scope: FullScope;
-  iam: ScopeIAM;
-}
-
-export default function ScopeSettingsPage(
-  { params, data, state }: PageProps<Data, State>,
+export default define.page<typeof handler>(function ScopeSettingsPage(
+  { data, state },
 ) {
   return (
     <div class="mb-20">
-      <Head>
-        <title>
-          Settings - @{params.scope} - JSR
-        </title>
-      </Head>
       <ScopeHeader scope={data.scope} />
       <ScopeNav active="Settings" iam={data.iam} scope={data.scope.scope} />
       <ScopeQuotas scope={data.scope} user={state.user!} />
@@ -35,7 +24,7 @@ export default function ScopeSettingsPage(
       <DeleteScope scope={data.scope} />
     </div>
   );
-}
+});
 
 function ScopeQuotas({ scope, user }: { scope: FullScope; user: User }) {
   const requestLimitIncreaseBody = `Hello JSR team,
@@ -50,7 +39,7 @@ Reason: `;
     <div class="mt-8">
       <h2 class="text-lg sm:text-xl font-semibold">Quotas</h2>
       <div class="flex flex-col gap-8">
-        <p class="text-gray-600 max-w-2xl">
+        <p class="text-jsr-gray-600 max-w-2xl">
           Scopes have certain quotas to help prevent abuse. We are happy to
           increase your quotas as needed — just send us an increase request.
         </p>
@@ -95,13 +84,13 @@ function GitHubActionsSecurity({ scope }: { scope: FullScope }) {
   return (
     <div class="mb-12 mt-12">
       <h2 class="text-lg sm:text-xl font-semibold">GitHub Actions security</h2>
-      <p class="mt-2 text-gray-600 max-w-2xl">
+      <p class="mt-2 text-jsr-gray-600 max-w-2xl">
         GitHub Actions can be used to publish packages to JSR without having to
         set up authentication tokens. Publishing is permitted only if the
         workflow runs in the GitHub repository that is linked to the package on
         JSR.
       </p>
-      <p class="mt-4 text-gray-600 max-w-2xl">
+      <p class="mt-4 text-jsr-gray-600 max-w-2xl">
         Additionally, you can restrict publishing to be permitted only if the
         user that triggered the GitHub Actions workflow is a member of this
         scope on JSR.{" "}
@@ -150,7 +139,7 @@ function RequirePublishingFromCI({ scope }: { scope: FullScope }) {
       <h2 class="text-lg sm:text-xl font-semibold">
         Require Publishing from CI
       </h2>
-      <p class="mt-2 text-gray-600 max-w-2xl">
+      <p class="mt-2 text-jsr-gray-600 max-w-2xl">
         Requiring publishing from CI ensures that all new versions for packages
         in this scope are published from a GitHub Actions workflow. This
         disables the ability to publish with the{" "}
@@ -158,7 +147,7 @@ function RequirePublishingFromCI({ scope }: { scope: FullScope }) {
         command from a local development environment.
       </p>
 
-      <p class="mt-4 text-gray-600 max-w-2xl">
+      <p class="mt-4 text-jsr-gray-600 max-w-2xl">
         This setting is currently{" "}
         <span class="font-semibold">
           {scope.requirePublishingFromCI ? "enabled" : "disabled"}
@@ -207,7 +196,7 @@ interface CardButtonProps {
 function CardButton(props: CardButtonProps) {
   return (
     <button
-      class={`grid text-left rounded-xl p-6 group focus-visible:bg-jsr-yellow-50/30 hover:bg-jsr-yellow-50/30 focus-visible:ring-2 outline-none active:bg-gray-100 ring-2 ${
+      class={`grid text-left rounded-xl p-6 group focus-visible:bg-jsr-yellow-50/30 hover:bg-jsr-yellow-50/30 focus-visible:ring-2 outline-none active:bg-jsr-gray-100 ring-2 ${
         props.selected ? "ring-jsr-yellow-400" : "ring-jsr-gray-100/50"
       }`}
       type={props.type}
@@ -215,18 +204,20 @@ function CardButton(props: CardButtonProps) {
       value={props.value}
     >
       <div class="flex justify-between">
-        <p class="text-gray-900 font-semibold leading-none">{props.title}</p>
+        <p class="text-jsr-gray-900 font-semibold leading-none">
+          {props.title}
+        </p>
         <div
-          class={`-mt-2 -mr-2 h-6 w-6 rounded-full flex-shrink-0 flex justify-center items-center group-focus-visible:ring-2 ring-jsr-yellow-700 ${
+          class={`-mt-2 -mr-2 h-6 w-6 rounded-full flex-shrink-0 flex justify-center items-center group-focus-visible:ring-2 ring-jsr-yellow-700/20 ${
             props.selected
-              ? "border-1.5 border-jsr-cyan-950 bg-jsr-cyan-950 text-jsr-yellow"
-              : "border"
+              ? "ring ring-jsr-cyan-950 bg-jsr-cyan-950 text-jsr-yellow"
+              : "ring"
           }`}
         >
           {props.selected && <Check class="stroke-2 size-9" />}
         </div>
       </div>
-      <p class="mt-2 w-5/6 text-gray-600 text-sm">{props.description}</p>
+      <p class="mt-2 w-5/6 text-jsr-gray-600 text-sm">{props.description}</p>
     </button>
   );
 }
@@ -236,7 +227,7 @@ function DeleteScope({ scope }: { scope: FullScope }) {
   return (
     <form class="mb-8 mt-8" method="POST">
       <h2 class="text-lg font-semibold">Delete scope</h2>
-      <p class="mt-2 text-gray-600 max-w-3xl">
+      <p class="mt-2 text-jsr-gray-600 max-w-3xl">
         Deleting the scope will immediately allow other users to claim the scope
         and publish packages to it. This action cannot be undone.
       </p>
@@ -259,24 +250,28 @@ function DeleteScope({ scope }: { scope: FullScope }) {
   );
 }
 
-export const handler: Handlers<Data, State> = {
-  async GET(_req, ctx) {
+export const handler = define.handlers({
+  async GET(ctx) {
     const [user, data] = await Promise.all([
       ctx.state.userPromise,
       scopeDataWithMember(ctx.state, ctx.params.scope),
     ]);
     if (user instanceof Response) return user;
-    if (data === null) return ctx.renderNotFound();
+    if (data === null) throw new HttpError(404, "The scope was not found.");
 
     const iam = scopeIAM(ctx.state, data?.scopeMember, user);
-    if (!iam.canAdmin) return ctx.renderNotFound();
+    if (!iam.canAdmin) throw new HttpError(404, "The scope was not found.");
 
-    return ctx.render({
-      scope: data.scope as FullScope,
-      iam,
-    });
+    ctx.state.meta = { title: `Settings - @${data.scope.scope} - JSR` };
+    return {
+      data: {
+        scope: data.scope as FullScope,
+        iam,
+      },
+    };
   },
-  async POST(req, ctx) {
+  async POST(ctx) {
+    const req = ctx.req;
     const scope = ctx.params.scope;
     const form = await req.formData();
     const action = String(form.get("action"));
@@ -291,7 +286,9 @@ export const handler: Handlers<Data, State> = {
           { ghActionsVerifyActor: enableGhActionsVerifyActor },
         );
         if (!res.ok) {
-          if (res.code === "scopeNotFound") return ctx.renderNotFound();
+          if (res.code === "scopeNotFound") {
+            throw new HttpError(404, "The scope was not found.");
+          }
           throw res; // graceful handle errors
         }
         return new Response(null, {
@@ -306,7 +303,9 @@ export const handler: Handlers<Data, State> = {
           { requirePublishingFromCI: value },
         );
         if (!res.ok) {
-          if (res.code === "scopeNotFound") return ctx.renderNotFound();
+          if (res.code === "scopeNotFound") {
+            throw new HttpError(404, "The scope was not found.");
+          }
           throw res; // graceful handle errors
         }
         return new Response(null, {
@@ -317,7 +316,9 @@ export const handler: Handlers<Data, State> = {
       case "deleteScope": {
         const res = await ctx.state.api.delete(path`/scopes/${scope}`);
         if (!res.ok) {
-          if (res.code === "scopeNotFound") return ctx.renderNotFound();
+          if (res.code === "scopeNotFound") {
+            throw new HttpError(404, "The scope was not found.");
+          }
           throw res; // graceful handle errors
         }
         return new Response(null, {
@@ -329,4 +330,4 @@ export const handler: Handlers<Data, State> = {
         throw new Error("Invalid action " + action);
     }
   },
-};
+});

@@ -436,6 +436,104 @@ impl Queue {
   }
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BigQueryJobReference {
+  pub job_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BigQueryQueryResult {
+  pub job_reference: BigQueryJobReference,
+  pub page_token: Option<String>,
+  #[serde(default)]
+  pub rows: Vec<serde_json::Value>,
+  #[serde(default)]
+  pub errors: Option<serde_json::Value>,
+  pub job_complete: bool,
+}
+
+pub struct BigQuery {
+  pub(crate) client: Client,
+  pub(crate) project: String,
+  pub(crate) endpoint: String,
+}
+
+impl BigQuery {
+  pub fn new(
+    client: Client,
+    project: String,
+    endpoint: Option<String>,
+  ) -> Self {
+    Self {
+      client,
+      project,
+      endpoint: endpoint
+        .unwrap_or_else(|| "https://bigquery.googleapis.com/".into()),
+    }
+  }
+
+  #[instrument("gcp::BigQuery::query", skip(self), err, fields(project = %self.project))]
+  pub async fn query(
+    &self,
+    query: &str,
+    params: &[serde_json::Value],
+  ) -> Result<BigQueryQueryResult, anyhow::Error> {
+    let url = format!(
+      "{}/bigquery/v2/projects/{}/queries",
+      self.endpoint, self.project
+    );
+    let token = self.client.get_access_token().await?;
+    let resp = self
+      .client
+      .http()
+      .post(url)
+      .bearer_auth(token)
+      .json(&json!({ "query": query, "useLegacySql": false, "parameterMode": "NAMED", "queryParameters": params, "formatOptions": { "useInt64Timestamp": true } }))
+      .send()
+      .await?;
+    let status = resp.status();
+    if status != StatusCode::OK {
+      let body = resp.text().await?;
+      return Err(anyhow::anyhow!(
+        "Failed to query BigQuery (status={status}): {body}"
+      ));
+    }
+    let json = resp.json().await?;
+    Ok(json)
+  }
+
+  #[instrument("gcp::BigQuery::get_query_results", skip(self), err, fields(project = %self.project))]
+  pub async fn get_query_results(
+    &self,
+    job_id: &str,
+    page_token: &str,
+  ) -> Result<BigQueryQueryResult, anyhow::Error> {
+    let url = format!(
+      "{}/bigquery/v2/projects/{}/queries/{}?pageToken={}&formatOptions.useInt64Timestamp=true",
+      self.endpoint, self.project, job_id, page_token
+    );
+    let token = self.client.get_access_token().await?;
+    let resp = self
+      .client
+      .http()
+      .get(url)
+      .bearer_auth(token)
+      .send()
+      .await?;
+    let status = resp.status();
+    if status != StatusCode::OK {
+      let body = resp.text().await?;
+      return Err(anyhow::anyhow!(
+        "Failed to get query results (status={status}): {body}"
+      ));
+    }
+    let json = resp.json().await?;
+    Ok(json)
+  }
+}
+
 /// Fake Google Cloud Storage
 /// https://github.com/fsouza/fake-gcs-server
 #[cfg(test)]
@@ -475,10 +573,16 @@ impl FakeGcsTester {
 
     assert!(self.proc.is_none());
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     let p = concat!(
       env!("CARGO_MANIFEST_DIR"),
       "/../tools/bin/darwin-arm64/fake-gcs-server"
+    );
+
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    let p = concat!(
+      env!("CARGO_MANIFEST_DIR"),
+      "/../tools/bin/darwin-amd64/fake-gcs-server"
     );
 
     #[cfg(target_os = "linux")]
@@ -489,7 +593,7 @@ impl FakeGcsTester {
 
     println!("starting fake gcs server: {}", p);
     let mut proc = std::process::Command::new(p)
-      .arg(&format!("-port={}", self.port))
+      .arg(format!("-port={}", self.port))
       .arg("-scheme=http")
       .arg("-backend=memory")
       .process_group(0)

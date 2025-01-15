@@ -1,12 +1,14 @@
 // Copyright 2024 the JSR authors. All rights reserved. MIT license.
-import type { Handlers, RouteConfig } from "$fresh/server.ts";
-import { accepts } from "$oak_commons";
+import type { RouteConfig } from "fresh";
+import { accepts } from "@std/http/negotiation";
+import { define } from "../../util.ts";
 import { Scope } from "../../utils/api_types.ts";
 import { path } from "../../utils/api.ts";
-import { State } from "../../util.ts";
 
-export const handler: Handlers<unknown, State> = {
-  async GET(req, ctx) {
+export const handler = define.handlers({
+  async GET(ctx) {
+    const req = ctx.req;
+
     if (
       accepts(req, "application/json", "text/html", "image/*") ===
         "application/json"
@@ -37,9 +39,12 @@ export const handler: Handlers<unknown, State> = {
       shieldsUrl.search = url.search;
       shieldsUrl.searchParams.set("url", url.href);
       shieldsUrl.searchParams.set("logo", "jsr");
-      shieldsUrl.searchParams.set("logoColor", "rgb(8,51,68)");
       shieldsUrl.searchParams.set("logoSize", "auto");
       shieldsUrl.searchParams.set("cacheSeconds", "300");
+
+      if (!ctx.url.searchParams.has("logoColor")) {
+        shieldsUrl.searchParams.set("logoColor", "rgb(8,51,68)");
+      }
 
       const res = await fetch(shieldsUrl);
 
@@ -55,7 +60,7 @@ export const handler: Handlers<unknown, State> = {
       });
     }
   },
-};
+});
 
 export const config: RouteConfig = {
   routeOverride: "/badges/@:scope",

@@ -1,38 +1,28 @@
 // Copyright 2024 the JSR authors. All rights reserved. MIT license.
-import { Handlers, PageProps, RouteConfig } from "$fresh/server.ts";
+import { HttpError, RouteConfig } from "fresh";
 import type {
-  Package,
   PackageVersionWithUser,
   PublishingTask,
   PublishingTaskStatus,
-  ScopeMember,
 } from "../../utils/api_types.ts";
-import { State } from "../../util.ts";
-import { compare, eq, format, lt, parse, SemVer } from "$std/semver/mod.ts";
-import twas from "$twas";
+import { define } from "../../util.ts";
+import { compare, equals, format, lessThan, parse, SemVer } from "@std/semver";
+import twas from "twas";
 import IconTrashX from "$tabler_icons/trash-x.tsx";
 import { packageData } from "../../utils/data.ts";
 import { PackageHeader } from "./(_components)/PackageHeader.tsx";
 import { PackageNav, Params } from "./(_components)/PackageNav.tsx";
 import { path } from "../../utils/api.ts";
-import { Head } from "$fresh/runtime.ts";
 import { ErrorIcon } from "../../components/icons/Error.tsx";
 import { Check } from "../../components/icons/Check.tsx";
 import { Pending } from "../../components/icons/Pending.tsx";
 import { ScopeIAM, scopeIAM } from "../../utils/iam.ts";
 
-interface Data {
-  package: Package;
-  versions: PackageVersionWithUser[];
-  publishingTasks?: PublishingTask[];
-  member: ScopeMember | null;
-}
-
-export default function Versions({
+export default define.page<typeof handler>(function Versions({
   data,
   params,
   state,
-}: PageProps<Data, State>) {
+}) {
   const iam = scopeIAM(state, data.member);
 
   const latestVersionInReleaseTrack: Record<string, SemVer> = {};
@@ -60,9 +50,9 @@ export default function Versions({
     });
     if (version.yanked) continue;
     if (
-      semver.prerelease.length === 0 &&
+      (!semver.prerelease || semver.prerelease.length === 0) &&
       (latestVersionInReleaseTrack[releaseTrack] === undefined ||
-        lt(latestVersionInReleaseTrack[releaseTrack], semver))
+        lessThan(latestVersionInReleaseTrack[releaseTrack], semver))
     ) {
       latestVersionInReleaseTrack[releaseTrack] = semver;
     }
@@ -98,18 +88,6 @@ export default function Versions({
 
   return (
     <div class="mb-20">
-      <Head>
-        <title>
-          Versions - @{params.scope}/{params.package} - JSR
-        </title>
-        <meta
-          name="description"
-          content={`@${params.scope}/${params.package} on JSR${
-            data.package.description ? `: ${data.package.description}` : ""
-          }`}
-        />
-      </Head>
-
       <PackageHeader package={data.package} />
 
       <PackageNav
@@ -120,10 +98,10 @@ export default function Versions({
         latestVersion={data.package.latestVersion}
       />
 
-      <div class="space-y-4 mt-8">
+      <div class="space-y-3 mt-8">
         {versionsArray.length === 0
           ? (
-            <div class="text-gray-500 text-center">
+            <div class="text-jsr-gray-500 text-center">
               This package has not published any versions yet.
             </div>
           )
@@ -131,7 +109,7 @@ export default function Versions({
             const latestVersion =
               latestVersionInReleaseTrack[version.releaseTrack];
             const isLatestInReleaseTrack = latestVersion
-              ? eq(version.semver, latestVersion)
+              ? equals(version.semver, latestVersion)
               : false;
             return (
               <Version
@@ -147,7 +125,7 @@ export default function Versions({
       </div>
     </div>
   );
-}
+});
 
 const pluralRule = new Intl.PluralRules("en", { type: "ordinal" });
 const pluralSuffixes = new Map([
@@ -190,7 +168,7 @@ function Version({
 
   return (
     <div
-      class={`relative py-2 px-2 md:py-4 md:px-6 border rounded ${
+      class={`relative py-2 px-2 md:py-3 md:px-6 border rounded-lg ${
         (!isPublished && isFailed) || version?.yanked
           ? `bg-red-50 border-red-200 ${
             version?.yanked ? "hover:bg-red-100 hover:border-red-300" : ""
@@ -198,8 +176,8 @@ function Version({
           : (!isPublished
             ? "bg-blue-50 border-blue-200"
             : (isLatestInReleaseTrack
-              ? "bg-green-50 hover:bg-green-100 border-green-200 hover:border-green-300"
-              : "hover:bg-gray-100 border-gray-200 hover:border-gray-400"))
+              ? "bg-green-50 hover:bg-green-100 border-green-300 hover:border-green-400"
+              : "hover:bg-jsr-gray-100 border-jsr-gray-100 hover:border-jsr-gray-300"))
       }`}
     >
       <div class="flex items-center justify-between">
@@ -212,7 +190,7 @@ function Version({
                   ? "bg-blue-300 border-blue-400 text-blue-700"
                   : (isLatestInReleaseTrack
                     ? "bg-green-300 border-green-400 text-green-700"
-                    : "bg-gray-200 border-gray-300 text-gray-600"))
+                    : "bg-jsr-gray-200 border-jsr-gray-300 text-jsr-gray-600"))
             }`}
             title={version?.yanked
               ? "Yanked"
@@ -246,7 +224,7 @@ function Version({
                 </span>
               )}
             {isPublished && (
-              <div class="text-sm select-none text-gray-500 z-0">
+              <div class="text-sm select-none text-jsr-gray-500 z-0">
                 Released {version?.user && (
                   <>
                     {"by "}
@@ -259,7 +237,7 @@ function Version({
                     {" "}
                   </>
                 )}
-                {twas(new Date(version.createdAt))}
+                {twas(new Date(version.createdAt).getTime())}
               </div>
             )}
           </div>
@@ -279,7 +257,7 @@ function Version({
       </div>
       <ul>
         {tasks.map((task, i) => (
-          <li class="first:mt-3 mt-1 text-sm flex items-center gap-1 text-gray-500 w-full">
+          <li class="first:mt-3 mt-1 text-sm flex items-center gap-1 text-jsr-gray-500 w-full">
             {task.status === "failure"
               ? <ErrorIcon class="size-3 stroke-red-500 stroke-2" />
               : task.status === "success"
@@ -287,7 +265,8 @@ function Version({
               : <Pending class="size-3 stroke-blue-500 stroke-2" />}
             <span>
               {ordinalNumber(tasks.length - i)} publishing attempt{" "}
-              {statusVerb[task.status]} {twas(new Date(task.updatedAt))}
+              {statusVerb[task.status]}{" "}
+              {twas(new Date(task.updatedAt).getTime())}
             </span>
             <a href={`/status/${task.id}`} class="link justify-self-end z-20">
               Details
@@ -299,8 +278,8 @@ function Version({
   );
 }
 
-export const handler: Handlers<Data, State> = {
-  async GET(_, ctx) {
+export const handler = define.handlers({
+  async GET(ctx) {
     const [res, versionsResp, tasksResp] = await Promise.all([
       packageData(ctx.state, ctx.params.scope, ctx.params.package),
       ctx.state.api.get<PackageVersionWithUser[]>(
@@ -312,7 +291,8 @@ export const handler: Handlers<Data, State> = {
         )
         : Promise.resolve(null),
     ]);
-    if (res === null) return ctx.renderNotFound();
+    if (res === null) throw new HttpError(404, "This package was not found.");
+
     if (!versionsResp.ok) throw versionsResp; // TODO: handle errors gracefully
     let publishingTasks;
     if (tasksResp) {
@@ -325,15 +305,24 @@ export const handler: Handlers<Data, State> = {
       }
     }
 
-    return ctx.render({
-      package: res.pkg,
-      versions: versionsResp.data,
-      publishingTasks,
-      member: res.scopeMember,
-    });
+    ctx.state.meta = {
+      title: `Versions - @${res.pkg.scope}/${res.pkg.name} - JSR`,
+      description: `@${res.pkg.scope}/${res.pkg.name} on JSR${
+        res.pkg.description ? `: ${res.pkg.description}` : ""
+      }`,
+    };
+    return {
+      data: {
+        package: res.pkg,
+        versions: versionsResp.data,
+        publishingTasks,
+        member: res.scopeMember,
+      },
+    };
   },
 
-  async POST(req, ctx) {
+  async POST(ctx) {
+    const req = ctx.req;
     const {
       scope,
       package: packageName,
@@ -373,7 +362,7 @@ export const handler: Handlers<Data, State> = {
       }
     }
   },
-};
+});
 
 export const config: RouteConfig = {
   routeOverride: "/@:scope/:package/versions",

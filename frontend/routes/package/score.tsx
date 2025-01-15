@@ -1,17 +1,12 @@
 // Copyright 2024 the JSR authors. All rights reserved. MIT license.
 import { ComponentChildren } from "preact";
-import { Handlers, PageProps, RouteConfig } from "$fresh/server.ts";
-import type {
-  Package,
-  PackageScore,
-  ScopeMember,
-} from "../../utils/api_types.ts";
+import { HttpError, RouteConfig } from "fresh";
+import type { PackageScore } from "../../utils/api_types.ts";
 import { path } from "../../utils/api.ts";
-import { State } from "../../util.ts";
+import { define } from "../../util.ts";
 import { packageData } from "../../utils/data.ts";
 import { PackageHeader } from "./(_components)/PackageHeader.tsx";
 import { PackageNav, Params } from "./(_components)/PackageNav.tsx";
-import { Head } from "$fresh/runtime.ts";
 import { Check } from "../../components/icons/Check.tsx";
 import { Cross } from "../../components/icons/Cross.tsx";
 import { ErrorIcon } from "../../components/icons/Error.tsx";
@@ -19,31 +14,13 @@ import { getScoreBgColorClass } from "../../utils/score_ring_color.ts";
 import { scopeIAM } from "../../utils/iam.ts";
 import { Logo } from "../../components/Logo.tsx";
 
-interface Data {
-  package: Package;
-  score: PackageScore;
-  member: ScopeMember | null;
-}
-
-export default function Score(
-  { data, params, state }: PageProps<Data, State>,
+export default define.page<typeof handler>(function Score(
+  { data, params, state },
 ) {
   const iam = scopeIAM(state, data.member);
 
   return (
     <div class="mb-20">
-      <Head>
-        <title>
-          Score - @{params.scope}/{params.package} - JSR
-        </title>
-        <meta
-          name="description"
-          content={`@${params.scope}/${params.package} on JSR${
-            data.package.description ? `: ${data.package.description}` : ""
-          }`}
-        />
-      </Head>
-
       <PackageHeader package={data.package} />
 
       <PackageNav
@@ -65,14 +42,14 @@ export default function Score(
           />
         )
         : (
-          <div class="mt-8 text-gray-500 text-center">
+          <div class="mt-8 text-jsr-gray-500 text-center">
             No score is available for this package, because it does not have a
             stable release.
           </div>
         )}
     </div>
   );
-}
+});
 
 function ScoreInfo(props: {
   scope: string;
@@ -105,7 +82,7 @@ function ScoreInfo(props: {
             {scorePercentage}%
           </span>
         </div>
-        <div class="text-gray-500 text-sm text-center mt-6">
+        <div class="text-jsr-gray-500 text-sm text-center mt-6">
           The JSR score is a measure of the overall quality of a package, based
           on a number of factors such as documentation and runtime
           compatibility.
@@ -153,12 +130,12 @@ function ScoreInfo(props: {
           scoreValue={5}
           title="Has docs for most symbols"
         >
-          At least 80% of the packages' symbols should have{" "}
+          At least 80% of the packages' exported symbols should have{" "}
           <a class="link" href="/docs/writing-docs#symbol-documentation">
             symbol documentation
           </a>. Currently{" "}
-          {(score.percentageDocumentedSymbols * 100).toFixed(0)}% of symbols are
-          documented.
+          {Math.floor(score.percentageDocumentedSymbols * 100)}% of exported
+          symbols are documented.
         </ScoreItem>
         <ScoreItem
           value={score.allFastCheck}
@@ -253,17 +230,34 @@ function ScoreItem(
   return (
     <li class="grid grid-cols-[auto_1fr_auto] gap-x-3 py-3 first:pt-0 items-start">
       {status === "complete"
-        ? <Check class="size-6 stroke-green-500 stroke-2 -mt-px" />
+        ? (
+          <>
+            <Check class="size-6 stroke-green-500 stroke-2 -mt-px" />
+            <span class="sr-only">Complete score</span>
+          </>
+        )
         : (status === "partial"
-          ? <ErrorIcon class="size-6 stroke-yellow-500 stroke-2 -mt-px" />
-          : <Cross class="size-6 stroke-red-500 stroke-2 -mt-px" />)}
+          ? (
+            <>
+              <ErrorIcon class="size-6 stroke-jsr-yellow-500 stroke-2 -mt-px" />
+              <span class="sr-only">Partial score</span>
+            </>
+          )
+          : (
+            <>
+              <Cross class="size-6 stroke-red-500 stroke-2 -mt-px" />
+              <span class="sr-only">Missing score</span>
+            </>
+          ))}
 
       <div class="max-w-xl pr-2">
         <h3 class="leading-tight">{props.title}</h3>
-        <p class="text-gray-500 text-sm leading-tight mt-1">{props.children}</p>
+        <p class="text-jsr-gray-500 text-sm leading-tight mt-1">
+          {props.children}
+        </p>
       </div>
 
-      <div class="text-sm text-gray-400 pt-[0.2em]">
+      <div class="text-sm text-jsr-gray-400 pt-[0.2em]">
         {typeof props.value === "number"
           ? (
             <span>
@@ -277,15 +271,15 @@ function ScoreItem(
   );
 }
 
-export const handler: Handlers<Data, State> = {
-  async GET(_req, ctx) {
+export const handler = define.handlers({
+  async GET(ctx) {
     const [res, scoreResp] = await Promise.all([
       packageData(ctx.state, ctx.params.scope, ctx.params.package),
       ctx.state.api.get<PackageScore>(
         path`/scopes/${ctx.params.scope}/packages/${ctx.params.package}/score`,
       ),
     ]);
-    if (res === null) return ctx.renderNotFound();
+    if (res === null) throw new HttpError(404, "This package was not found.");
 
     if (res.pkg.versionCount < 1) {
       return new Response("", {
@@ -297,13 +291,22 @@ export const handler: Handlers<Data, State> = {
     // TODO: handle errors gracefully
     if (!scoreResp.ok) throw scoreResp;
 
-    return ctx.render({
-      package: res.pkg,
-      score: scoreResp.data,
-      member: res.scopeMember,
-    }, { headers: { "X-Robots-Tag": "noindex" } });
+    ctx.state.meta = {
+      title: `Score - @${res.pkg.scope}/${res.pkg.name} - JSR`,
+      description: `@${res.pkg.scope}/${res.pkg.name} on JSR${
+        res.pkg.description ? `: ${res.pkg.description}` : ""
+      }`,
+    };
+    return {
+      data: {
+        package: res.pkg,
+        score: scoreResp.data,
+        member: res.scopeMember,
+      },
+      headers: { "X-Robots-Tag": "noindex" },
+    };
   },
-};
+});
 
 export const config: RouteConfig = {
   routeOverride: "/@:scope/:package/score",

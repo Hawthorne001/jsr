@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use deno_ast::swc::common::comments::CommentKind;
 use deno_ast::swc::common::Span;
 use deno_ast::LineAndColumnDisplay;
@@ -20,6 +21,7 @@ use deno_graph::source::NullFileSystem;
 use deno_graph::BuildFastCheckTypeGraphOptions;
 use deno_graph::BuildOptions;
 use deno_graph::CapturingModuleAnalyzer;
+use deno_graph::DefaultEsParser;
 use deno_graph::GraphKind;
 use deno_graph::ModuleGraph;
 use deno_graph::ModuleInfo;
@@ -32,6 +34,7 @@ use deno_semver::package::PackageNv;
 use deno_semver::package::PackageReqReference;
 use futures::FutureExt;
 use once_cell::sync::Lazy;
+use regex::bytes::Regex as BytesRegex;
 use regex::Regex;
 use tracing::instrument;
 use tracing::Instrument;
@@ -61,7 +64,8 @@ pub struct PackageAnalysisData {
 pub struct PackageAnalysisOutput {
   pub data: PackageAnalysisData,
   pub module_graph_2: HashMap<String, ModuleInfo>,
-  pub doc_nodes: DocNodesByUrl,
+  pub doc_nodes_json: Bytes,
+  pub doc_search_json: serde_json::Value,
   pub dependencies: HashSet<(DependencyKind, PackageReqReference)>,
   pub npm_tarball: NpmTarball,
   pub readme_path: Option<PackagePath>,
@@ -127,29 +131,29 @@ async fn analyze_package_inner(
 
   let module_analyzer = ModuleAnalyzer::default();
 
-  let workspace_members = vec![WorkspaceMember {
+  let workspace_member = WorkspaceMember {
     base: Url::parse("file:///").unwrap(),
+    name: format!("@{}/{}", scope, name),
+    version: Some(version.0.clone()),
     exports: exports.clone().into_inner(),
-    nv: PackageNv {
-      name: format!("@{}/{}", scope, name),
-      version: version.0.clone(),
-    },
-  }];
+  };
+  let workspace_members = vec![workspace_member.clone()];
   let mut graph = deno_graph::ModuleGraph::new(GraphKind::All);
-  let diagnostics = graph
+  graph
     .build(
       roots.clone(),
       &SyncLoader { files: &files },
       BuildOptions {
         is_dynamic: false,
         module_analyzer: &module_analyzer,
-        workspace_members: &workspace_members,
         imports: Default::default(),
         // todo: use the data in the package for the file system
         file_system: &NullFileSystem,
         jsr_url_provider: &PassthroughJsrUrlProvider,
         passthrough_jsr_specifiers: true,
-        resolver: None,
+        resolver: Some(&JsrResolver {
+          member: workspace_member,
+        }),
         npm_resolver: None,
         reporter: None,
         executor: Default::default(),
@@ -157,7 +161,6 @@ async fn analyze_package_inner(
       },
     )
     .await;
-  assert!(diagnostics.is_empty());
   graph
     .valid()
     .map_err(|e| PublishError::GraphError(Box::new(e)))?;
@@ -165,7 +168,7 @@ async fn analyze_package_inner(
     fast_check_cache: None,
     fast_check_dts: true,
     jsr_url_provider: &PassthroughJsrUrlProvider,
-    module_parser: Some(&module_analyzer.analyzer),
+    es_parser: Some(&module_analyzer.analyzer),
     resolver: Default::default(),
     npm_resolver: Default::default(),
     workspace_fast_check: WorkspaceFastCheckOption::Enabled(&workspace_members),
@@ -183,6 +186,7 @@ async fn analyze_package_inner(
       .analyzer
       .get_parsed_source(module.specifier())
     {
+      check_for_banned_extensions(&parsed_source)?;
       check_for_banned_syntax(&parsed_source)?;
       check_for_banned_triple_slash_directives(&parsed_source)?;
     }
@@ -225,21 +229,61 @@ async fn analyze_package_inner(
       .find(|file| file.0.case_insensitive().is_readme());
 
     (
-      generate_score(main_entrypoint, &doc_nodes, &readme, all_fast_check),
+      generate_score(
+        main_entrypoint.clone(),
+        &doc_nodes,
+        &readme,
+        all_fast_check,
+      ),
       readme.map(|readme| readme.0.clone()),
     )
+  };
+
+  let doc_nodes_json = serde_json::to_vec(&doc_nodes).unwrap().into();
+
+  let info = crate::docs::get_docs_info(&exports, None);
+
+  let ctx = crate::docs::get_generate_ctx(
+    doc_nodes,
+    main_entrypoint,
+    info.rewrite_map,
+    scope,
+    name,
+    version,
+    true,
+    None,
+    false,
+    crate::db::RuntimeCompat {
+      browser: None,
+      deno: None,
+      node: None,
+      workerd: None,
+      bun: None,
+    },
+    registry_url.to_string(),
+  );
+  let search_index = deno_doc::html::generate_search_index(&ctx);
+  let doc_search_json = if let serde_json::Value::Object(mut obj) = search_index
+  {
+    obj.remove("nodes").unwrap()
+  } else {
+    unreachable!()
   };
 
   Ok(PackageAnalysisOutput {
     data: PackageAnalysisData { exports, files },
     module_graph_2,
-    doc_nodes,
+    doc_nodes_json,
+    doc_search_json,
     dependencies,
     npm_tarball,
     readme_path,
     meta,
   })
 }
+
+static INDENTED_CODE_BLOCK_RE: Lazy<BytesRegex> =
+  Lazy::new(|| BytesRegex::new(r#"\n\s*?\n( {4}|\t)[^\S\n]*\S"#).unwrap());
 
 fn generate_score(
   main_entrypoint: Option<ModuleSpecifier>,
@@ -253,19 +297,25 @@ fn generate_score(
         .get(main_entrypoint)
         .unwrap()
         .iter()
-        .find(|node| node.kind == DocNodeKind::ModuleDoc)
+        .find(|node| node.kind() == DocNodeKind::ModuleDoc)
         .map(|node| &node.js_doc)
     });
 
-  let has_readme_examples = readme
-    .is_some_and(|(_, readme)| readme.windows(3).any(|chars| chars == b"```"))
-    || main_entrypoint_doc.is_some_and(|js_doc| {
-      js_doc.doc.as_ref().is_some_and(|doc| doc.contains("```"))
-        || js_doc
-          .tags
-          .iter()
-          .any(|tag| matches!(tag, deno_doc::js_doc::JsDocTag::Example { .. }))
-    });
+  let has_readme_examples = readme.is_some_and(|(_, readme)| {
+    readme
+      .windows(3)
+      .any(|chars| chars == b"```" || chars == b"~~~")
+      || INDENTED_CODE_BLOCK_RE.is_match(readme)
+  }) || main_entrypoint_doc.is_some_and(|js_doc| {
+    js_doc
+      .doc
+      .as_ref()
+      .is_some_and(|doc| doc.contains("```") || doc.contains("~~~"))
+      || js_doc
+        .tags
+        .iter()
+        .any(|tag| matches!(tag, deno_doc::js_doc::JsDocTag::Example { .. }))
+  });
 
   PackageVersionMeta {
     has_readme: readme.is_some()
@@ -292,7 +342,7 @@ fn all_entrypoints_have_module_doc(
 ) -> bool {
   'modules: for (specifier, nodes) in doc_nodes_by_url {
     for node in nodes {
-      if node.kind == DocNodeKind::ModuleDoc {
+      if node.kind() == DocNodeKind::ModuleDoc {
         continue 'modules;
       }
     }
@@ -317,8 +367,8 @@ fn percentage_of_symbols_with_docs(doc_nodes_by_url: &DocNodesByUrl) -> f32 {
 
   for (_specifier, nodes) in doc_nodes_by_url {
     for node in nodes {
-      if node.kind == DocNodeKind::ModuleDoc
-        || node.kind == DocNodeKind::Import
+      if node.kind() == DocNodeKind::ModuleDoc
+        || node.kind() == DocNodeKind::Import
         || node.declaration_kind == deno_doc::node::DeclarationKind::Private
       {
         continue;
@@ -359,11 +409,53 @@ impl JsrUrlProvider for PassthroughJsrUrlProvider {
   }
 }
 
+#[derive(Debug)]
+pub struct JsrResolver {
+  pub member: WorkspaceMember,
+}
+
+impl deno_graph::source::Resolver for JsrResolver {
+  fn resolve(
+    &self,
+    specifier_text: &str,
+    referrer_range: &deno_graph::Range,
+    _kind: deno_graph::source::ResolutionKind,
+  ) -> Result<ModuleSpecifier, deno_graph::source::ResolveError> {
+    if let Ok(package_ref) = JsrPackageReqReference::from_str(specifier_text) {
+      if self.member.name == package_ref.req().name
+        && self
+          .member
+          .version
+          .as_ref()
+          .map(|v| package_ref.req().version_req.matches(v))
+          .unwrap_or(true)
+      {
+        let export_name = package_ref.sub_path().unwrap_or(".");
+        let Some(export) = self.member.exports.get(export_name) else {
+          return Err(deno_graph::source::ResolveError::Other(
+            anyhow::anyhow!(
+              "export '{}' not found in jsr:{}",
+              export_name,
+              self.member.name
+            ),
+          ));
+        };
+        return Ok(self.member.base.join(export).unwrap());
+      }
+    }
+
+    Ok(deno_graph::resolve_import(
+      specifier_text,
+      &referrer_range.specifier,
+    )?)
+  }
+}
+
 struct SyncLoader<'a> {
   files: &'a HashMap<PackagePath, Vec<u8>>,
 }
 
-impl<'a> SyncLoader<'a> {
+impl SyncLoader<'_> {
   fn load_sync(
     &self,
     specifier: &ModuleSpecifier,
@@ -382,7 +474,7 @@ impl<'a> SyncLoader<'a> {
           maybe_headers: None,
         }))
       }
-      "http" | "https" | "node" | "npm" | "jsr" => {
+      "http" | "https" | "node" | "npm" | "jsr" | "bun" => {
         Ok(Some(deno_graph::source::LoadResponse::External {
           specifier: specifier.clone(),
         }))
@@ -393,7 +485,7 @@ impl<'a> SyncLoader<'a> {
   }
 }
 
-impl<'a> deno_graph::source::Loader for SyncLoader<'a> {
+impl deno_graph::source::Loader for SyncLoader<'_> {
   fn load(
     &self,
     specifier: &ModuleSpecifier,
@@ -464,15 +556,14 @@ async fn rebuild_npm_tarball_inner(
   let module_analyzer = ModuleAnalyzer::default();
 
   let mut graph = deno_graph::ModuleGraph::new(GraphKind::All);
-  let workspace_members = vec![WorkspaceMember {
+  let workspace_member = WorkspaceMember {
     base: Url::parse("file:///").unwrap(),
+    name: format!("@{}/{}", scope, name),
+    version: Some(version.0.clone()),
     exports: exports.clone().into_inner(),
-    nv: PackageNv {
-      name: format!("@{}/{}", scope, name),
-      version: version.0.clone(),
-    },
-  }];
-  let diagnostics = graph
+  };
+  let workspace_members = vec![workspace_member.clone()];
+  graph
     .build(
       roots.clone(),
       &GcsLoader {
@@ -485,13 +576,14 @@ async fn rebuild_npm_tarball_inner(
       BuildOptions {
         is_dynamic: false,
         module_analyzer: &module_analyzer,
-        workspace_members: &workspace_members,
         imports: Default::default(),
         // todo: use the data in the package for the file system
         file_system: &NullFileSystem,
         jsr_url_provider: &PassthroughJsrUrlProvider,
         passthrough_jsr_specifiers: true,
-        resolver: Default::default(),
+        resolver: Some(&JsrResolver {
+          member: workspace_member,
+        }),
         npm_resolver: Default::default(),
         reporter: Default::default(),
         executor: Default::default(),
@@ -499,13 +591,12 @@ async fn rebuild_npm_tarball_inner(
       },
     )
     .await;
-  assert!(diagnostics.is_empty());
   graph.valid()?;
   graph.build_fast_check_type_graph(BuildFastCheckTypeGraphOptions {
     fast_check_cache: Default::default(),
     fast_check_dts: true,
     jsr_url_provider: &PassthroughJsrUrlProvider,
-    module_parser: Some(&module_analyzer.analyzer),
+    es_parser: Some(&module_analyzer.analyzer),
     resolver: None,
     npm_resolver: None,
     workspace_fast_check: WorkspaceFastCheckOption::Enabled(&workspace_members),
@@ -538,7 +629,7 @@ struct GcsLoader<'a> {
   version: &'a Version,
 }
 
-impl<'a> GcsLoader<'a> {
+impl GcsLoader<'_> {
   fn load_inner(
     &self,
     specifier: &ModuleSpecifier,
@@ -567,7 +658,7 @@ impl<'a> GcsLoader<'a> {
         }
         .boxed()
       }
-      "http" | "https" | "node" | "npm" | "jsr" => async move {
+      "http" | "https" | "node" | "npm" | "jsr" | "bun" => async move {
         Ok(Some(deno_graph::source::LoadResponse::External {
           specifier,
         }))
@@ -579,7 +670,7 @@ impl<'a> GcsLoader<'a> {
   }
 }
 
-impl<'a> deno_graph::source::Loader for GcsLoader<'a> {
+impl deno_graph::source::Loader for GcsLoader<'_> {
   fn load(
     &self,
     specifier: &ModuleSpecifier,
@@ -590,9 +681,36 @@ impl<'a> deno_graph::source::Loader for GcsLoader<'a> {
 }
 
 #[derive(Default)]
+pub struct ModuleParser(DefaultEsParser);
+
+impl deno_graph::EsParser for ModuleParser {
+  fn parse_program(
+    &self,
+    options: deno_graph::ParseOptions,
+  ) -> Result<ParsedSource, deno_ast::ParseDiagnostic> {
+    let source = self.0.parse_program(options)?;
+    if let Some(err) = source.diagnostics().first() {
+      return Err(err.clone());
+    }
+    Ok(source)
+  }
+}
+
 pub struct ModuleAnalyzer {
   pub analyzer: CapturingModuleAnalyzer,
   pub module_info: RefCell<HashMap<Url, ModuleInfo>>,
+}
+
+impl Default for ModuleAnalyzer {
+  fn default() -> Self {
+    Self {
+      analyzer: CapturingModuleAnalyzer::new(
+        Some(Box::new(ModuleParser::default())),
+        None,
+      ),
+      module_info: Default::default(),
+    }
+  }
 }
 
 impl ModuleAnalyzer {
@@ -666,7 +784,7 @@ fn collect_dependencies(
           }
         }
       }
-      "file" | "data" | "node" => {}
+      "file" | "data" | "node" | "bun" => {}
       "http" | "https" => {
         return Err(PublishError::InvalidExternalImport {
           specifier: module.specifier().to_string(),
@@ -685,6 +803,21 @@ fn collect_dependencies(
   Ok(dependencies)
 }
 
+fn check_for_banned_extensions(
+  parsed_source: &ParsedSource,
+) -> Result<(), PublishError> {
+  match parsed_source.media_type() {
+    deno_ast::MediaType::Cjs | deno_ast::MediaType::Cts => {
+      Err(PublishError::CommonJs {
+        specifier: parsed_source.specifier().to_string(),
+        line: 0,
+        column: 0,
+      })
+    }
+    _ => Ok(()),
+  }
+}
+
 fn check_for_banned_syntax(
   parsed_source: &ParsedSource,
 ) -> Result<(), PublishError> {
@@ -695,14 +828,14 @@ fn check_for_banned_syntax(
       line_number,
       column_number,
     } = parsed_source
-      .text_info()
+      .text_info_lazy()
       .line_and_column_display(range.start);
     (line_number, column_number)
   };
 
-  for i in parsed_source.module().body.iter() {
+  for i in parsed_source.program_ref().body() {
     match i {
-      ast::ModuleItem::ModuleDecl(n) => match n {
+      deno_ast::ModuleItemRef::ModuleDecl(n) => match n {
         ast::ModuleDecl::TsNamespaceExport(n) => {
           let (line, column) = line_col(&n.range());
           return Err(PublishError::GlobalTypeAugmentation {
@@ -734,10 +867,8 @@ fn check_for_banned_syntax(
         },
         ast::ModuleDecl::Import(n) => {
           if let Some(with) = &n.with {
-            let range =
-              Span::new(n.src.span.hi(), with.span.lo(), n.src.span.ctxt)
-                .range();
-            let keyword = parsed_source.text_info().range_text(&range);
+            let range = Span::new(n.src.span.hi(), with.span.lo()).range();
+            let keyword = parsed_source.text_info_lazy().range_text(&range);
             if keyword.contains("assert") {
               let (line, column) = line_col(&with.span.range());
               return Err(PublishError::BannedImportAssertion {
@@ -751,9 +882,8 @@ fn check_for_banned_syntax(
         ast::ModuleDecl::ExportNamed(n) => {
           if let Some(with) = &n.with {
             let src = n.src.as_ref().unwrap();
-            let range =
-              Span::new(src.span.hi(), with.span.lo(), src.span.ctxt).range();
-            let keyword = parsed_source.text_info().range_text(&range);
+            let range = Span::new(src.span.hi(), with.span.lo()).range();
+            let keyword = parsed_source.text_info_lazy().range_text(&range);
             if keyword.contains("assert") {
               let (line, column) = line_col(&with.span.range());
               return Err(PublishError::BannedImportAssertion {
@@ -766,10 +896,8 @@ fn check_for_banned_syntax(
         }
         ast::ModuleDecl::ExportAll(n) => {
           if let Some(with) = &n.with {
-            let range =
-              Span::new(n.src.span.hi(), with.span.lo(), n.src.span.ctxt)
-                .range();
-            let keyword = parsed_source.text_info().range_text(&range);
+            let range = Span::new(n.src.span.hi(), with.span.lo()).range();
+            let keyword = parsed_source.text_info_lazy().range_text(&range);
             if keyword.contains("assert") {
               let (line, column) = line_col(&with.span.range());
               return Err(PublishError::BannedImportAssertion {
@@ -782,7 +910,7 @@ fn check_for_banned_syntax(
         }
         _ => continue,
       },
-      ast::ModuleItem::Stmt(n) => match n {
+      deno_ast::ModuleItemRef::Stmt(n) => match n {
         ast::Stmt::Decl(ast::Decl::TsModule(n)) => {
           if n.global {
             let (line, column) = line_col(&n.range());
@@ -830,7 +958,7 @@ fn check_for_banned_triple_slash_directives(
     }
     if TRIPLE_SLASH_RE.is_match(&comment.text) {
       let lc = parsed_source
-        .text_info()
+        .text_info_lazy()
         .line_and_column_display(comment.range().start);
       return Err(PublishError::BannedTripleSlashDirectives {
         specifier: parsed_source.specifier().to_string(),
@@ -845,17 +973,45 @@ fn check_for_banned_triple_slash_directives(
 #[cfg(test)]
 mod tests {
   fn parse(source: &str) -> deno_ast::ParsedSource {
-    let specifier = deno_ast::ModuleSpecifier::parse("file:///mod.ts").unwrap();
     let media_type = deno_ast::MediaType::TypeScript;
+    parse_with_media_type(source, media_type)
+  }
+
+  fn parse_with_media_type(
+    source: &str,
+    media_type: deno_ast::MediaType,
+  ) -> deno_ast::ParsedSource {
+    let specifier = deno_ast::ModuleSpecifier::parse("file:///mod.ts").unwrap();
     deno_ast::parse_module(deno_ast::ParseParams {
       specifier,
-      text_info: deno_ast::SourceTextInfo::new(source.into()),
+      text: source.into(),
       media_type,
       capture_tokens: false,
       scope_analysis: false,
       maybe_syntax: None,
     })
     .unwrap()
+  }
+
+  #[test]
+  fn banned_extensions() {
+    let x =
+      parse_with_media_type("let x = 1;", deno_ast::MediaType::TypeScript);
+    assert!(super::check_for_banned_extensions(&x).is_ok());
+
+    let x = parse_with_media_type("let x = 1;", deno_ast::MediaType::Cjs);
+    let err = super::check_for_banned_extensions(&x).unwrap_err();
+    assert!(
+      matches!(err, super::PublishError::CommonJs { .. }),
+      "{err:?}",
+    );
+
+    let x = parse_with_media_type("let x = 1;", deno_ast::MediaType::Cts);
+    let err = super::check_for_banned_extensions(&x).unwrap_err();
+    assert!(
+      matches!(err, super::PublishError::CommonJs { .. }),
+      "{err:?}",
+    );
   }
 
   #[test]

@@ -27,7 +27,7 @@ pub struct SpecifierRewriter<'a> {
   pub dependencies: &'a IndexMap<String, Dependency>,
 }
 
-impl<'a> SpecifierRewriter<'a> {
+impl SpecifierRewriter<'_> {
   pub fn rewrite(&self, specifier: &str, kind: RewriteKind) -> Option<String> {
     let source_text_specifier = specifier;
     let dep = self.dependencies.get(specifier)?;
@@ -159,7 +159,6 @@ pub fn rewrite_npm_and_jsr_specifier(specifier: &str) -> Option<String> {
 
 pub enum Extension {
   Js,
-  #[allow(dead_code)]
   Dts,
 }
 

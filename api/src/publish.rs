@@ -5,16 +5,17 @@ use std::collections::HashSet;
 use crate::api::ApiError;
 use crate::buckets::Buckets;
 use crate::buckets::UploadTaskBody;
+use crate::db::Database;
 use crate::db::DependencyKind;
 use crate::db::ExportsMap;
 use crate::db::NewNpmTarball;
 use crate::db::NewPackageFile;
 use crate::db::NewPackageVersion;
 use crate::db::NewPackageVersionDependency;
+use crate::db::PackageVersionMeta;
 use crate::db::PublishingTask;
 use crate::db::PublishingTaskError;
 use crate::db::PublishingTaskStatus;
-use crate::db::{Database, PackageVersionMeta};
 use crate::gcp::GcsUploadOptions;
 use crate::gcp::CACHE_CONTROL_DO_NOT_CACHE;
 use crate::gcp::CACHE_CONTROL_IMMUTABLE;
@@ -98,6 +99,7 @@ pub async fn publish_task(
         let res = process_publishing_task(
           &db,
           &buckets,
+          &orama_client,
           registry_url.clone(),
           &mut publishing_task,
         )
@@ -140,7 +142,7 @@ pub async fn publish_task(
               &publishing_task.package_name,
             )
             .await?
-            .ok_or_else(|| ApiError::InternalServerError)?;
+            .ok_or(ApiError::InternalServerError)?;
           orama_client.upsert_package(&package, &meta);
         }
         return Ok(());
@@ -152,6 +154,7 @@ pub async fn publish_task(
 async fn process_publishing_task(
   db: &Database,
   buckets: &Buckets,
+  orama_client: &Option<OramaClient>,
   registry_url: Url,
   publishing_task: &mut PublishingTask,
 ) -> Result<(), anyhow::Error> {
@@ -199,6 +202,7 @@ async fn process_publishing_task(
     npm_tarball_info,
     readme_path,
     meta,
+    doc_search_json,
   } = output;
 
   upload_version_manifest(
@@ -221,6 +225,14 @@ async fn process_publishing_task(
     meta,
   )
   .await?;
+
+  if let Some(orama_client) = orama_client {
+    orama_client.upsert_symbols(
+      &publishing_task.package_scope,
+      &publishing_task.package_name,
+      doc_search_json,
+    );
+  }
 
   Ok(())
 }
@@ -779,7 +791,7 @@ pub mod tests {
       .unwrap();
     let deno_json: ConfigFile = serde_json::from_slice(&json).unwrap();
     assert_eq!(deno_json.name.to_string(), "@scope/foo");
-    assert_eq!(deno_json.version.to_string(), "1.2.3");
+    assert_eq!(deno_json.version.unwrap().to_string(), "1.2.3");
     {
       let metadata_json = t
         .buckets
@@ -810,6 +822,7 @@ pub mod tests {
         HashMap::from_iter([(
           "/mod.ts".to_string(),
           ModuleInfo {
+            is_script: false,
             dependencies: vec![],
             ts_references: vec![],
             self_types_specifier: None,
@@ -1100,7 +1113,7 @@ pub mod tests {
     assert_eq!(task.status, PublishingTaskStatus::Failure, "{task:#?}");
     let error = task.error.unwrap();
     assert_eq!(error.code, "invalidExternalImport");
-    assert_eq!(error.message, "invalid external import to 'https://deno.land/r/std/http/server.ts', only 'jsr:', 'npm:', 'data:' and 'node:' imports are allowed (http(s) import)");
+    assert_eq!(error.message, "invalid external import to 'https://deno.land/r/std/http/server.ts', only 'jsr:', 'npm:', 'data:', 'bun:', and 'node:' imports are allowed (http(s) import)");
   }
 
   async fn uses_npm(t: &TestSetup, task: &crate::db::PublishingTask) -> bool {
@@ -1123,6 +1136,15 @@ pub mod tests {
     let task = process_tarball_setup(&t, bytes).await;
     assert_eq!(task.status, PublishingTaskStatus::Success, "{task:#?}");
     assert!(uses_npm(&t, &task).await);
+  }
+
+  #[tokio::test]
+  async fn bun_import() {
+    let t = TestSetup::new().await;
+    let bytes = create_mock_tarball("bun_import");
+    let task = process_tarball_setup(&t, bytes).await;
+    assert_eq!(task.status, PublishingTaskStatus::Success, "{task:#?}");
+    assert!(!uses_npm(&t, &task).await);
   }
 
   #[tokio::test]
@@ -1195,6 +1217,17 @@ pub mod tests {
     let error = task.error.unwrap();
     assert_eq!(error.code, "graphError");
     assert_eq!(error.message, "failed to build module graph: The module's source code could not be parsed: Expression expected at file:///mod.ts:1:27\n\n  const invalidTypeScript = ;\n                            ~");
+  }
+
+  #[tokio::test]
+  async fn syntax_error_two() {
+    let t = TestSetup::new().await;
+    let bytes = create_mock_tarball("syntax_error_two");
+    let task = process_tarball_setup(&t, bytes).await;
+    assert_eq!(task.status, PublishingTaskStatus::Failure, "{task:#?}");
+    let error = task.error.unwrap();
+    assert_eq!(error.code, "graphError");
+    assert_eq!(error.message, "failed to build module graph: The module's source code could not be parsed: Expression expected at file:///mod.ts:1:1\n\n  +\n  ~");
   }
 
   #[tokio::test]
@@ -1274,6 +1307,16 @@ pub mod tests {
     let bytes = create_mock_tarball("triple_slash_reference_in_jsdoc");
     let task = process_tarball_setup(&t, bytes).await;
     assert_eq!(task.status, PublishingTaskStatus::Success, "{task:#?}");
+  }
+
+  #[tokio::test]
+  async fn cjs_import() {
+    let t = TestSetup::new().await;
+    let bytes = create_mock_tarball("cjs_import");
+    let task = process_tarball_setup(&t, bytes).await;
+    assert_eq!(task.status, PublishingTaskStatus::Failure, "{task:#?}");
+    let error = task.error.unwrap();
+    assert_eq!(error.code, "commonJs");
   }
 
   #[tokio::test]
