@@ -182,6 +182,9 @@ pub async fn publish_task(
   }
 }
 
+// `algolia_client`/`doc_search_json` are unused while symbol indexing is
+// disabled; keep them so re-enabling is just uncommenting the block below.
+#[allow(unused_variables)]
 async fn process_publishing_task(
   db: &Database,
   buckets: &Buckets,
@@ -269,13 +272,13 @@ async fn process_publishing_task(
   )
   .await?;
 
-  if let Some(algolia_client) = algolia_client {
+  /*if let Some(algolia_client) = algolia_client {
     algolia_client.upsert_symbols(
       &publishing_task.package_scope,
       &publishing_task.package_name,
       doc_search_json,
     );
-  }
+  }*/
 
   Ok(())
 }
